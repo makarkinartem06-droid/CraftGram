@@ -13,84 +13,108 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Set up JDK 17
+      - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Find or install Android SDK
-        run: |
-          set -e
-          SDK=""
-          for d in "$ANDROID_HOME" "$ANDROID_SDK_ROOT" /usr/local/lib/android/sdk /usr/lib/android-sdk /opt/android-sdk "$HOME/Android/Sdk"; do
-            if [ -n "$d" ] && [ -d "$d" ]; then
-              SDK="$d"
-              break
-            fi
-          done
-
-          if [ -z "$SDK" ]; then
-            echo "No SDK found, installing cmdline-tools..."
-            SDK="$HOME/android-sdk"
-            mkdir -p "$SDK/cmdline-tools"
-            cd /tmp
-            curl -sSL -o cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-            unzip -q cmdtools.zip -d "$SDK/cmdline-tools"
-            mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
-          fi
-
-          echo "Using SDK at: $SDK"
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-
-          SDKMANAGER=""
-          if [ -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
-            SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
-          else
-            SDKMANAGER=$(find "$SDK" -name sdkmanager -type f 2>/dev/null | head -n 1 || true)
-          fi
-
-          if [ -n "$SDKMANAGER" ]; then
-            echo "sdkmanager: $SDKMANAGER"
-            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          else
-            echo "sdkmanager not found, gradle will handle SDK components itself"
-          fi
-
-          echo "sdk.dir=$SDK" >> "$GITHUB_WORKSPACE/local.properties"
-
-      - name: Write API keys
+      - name: Проверка ключей
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_HASH: ${{ secrets.APP_HASH }}
         run: |
           if [ -z "$APP_ID" ] || [ -z "$APP_HASH" ]; then
-            echo "ERROR: secrets APP_ID / APP_HASH are missing!"
+            echo "НЕТ КЛЮЧЕЙ: зайди в Settings - Secrets and variables - Actions и создай APP_ID и APPAPP_HASH"
             exit 1
           fi
-          echo "TELEGRAM_APP_ID=$APP_ID" >> gradle.properties
-          echo "TELEGRAM_APP_HASH=$APP_HASH" >> gradle.properties
-          echo "APP_ID=$APP_ID" >> local.properties
-          echo "APP_HASH=$APP_HASH" >> local.properties
+          echo "ключи на месте, погнали"
 
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Build APK
+      - name: Android SDK и NDK
         run: |
-          set -e
-          ./gradlew --no-daemon --stacktrace assembleAfatDebug || ./gradlew --no-daemon --stacktrace assembleDebug
+          if [ -z "$ANDROID_HOME" ] && [ -z "$ANDROID_SDK_ROOT" ]; then
+            export ANDROID_HOME="$HOME/android-sdk"
+          fi
+          SDKMANAGER=""
+          for p in "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "$ANDROID_HOME/tools/bin/sdkmanager"; do
+            if [ -x "$p" ]; then SDKMANAGER="$p"; break; fi
+          done
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager не найден, ставлю свой"
+            mkdir -p "$ANDROID_HOME/cmdline-tools"
+            curl -L -o /tmp/cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdtools.zip -d /tmp/cmdtools
+            rm -rf "$ANDROID_HOME/cmdline-tools/latest"
+            mv /tmp/cmdtools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "platforms;android-35" "build-tools;34.0.0" "build-tools;35.0.0" "cmake;3.22.1" "ndk;25.1.8937393" || true
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          "$SDKMANAGER" --list_installed 2>/dev/null | head -n 30 || true
 
-      - name: Upload APK
+      - name: Сборка APK
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_HASH: ${{ secrets.APP_HASH }}
+        run: |
+          chmod +x gradlew
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          ./gradlew assembleRelease --no-daemon -PAPP_ID="$APP_ID" -PAPP_HASH="$APP_HASH" > build.log 2>&1
+          STATUS=$?
+          if [ $STATUS -ne 0 ] && grep -q "Task .assembleRelease. not found" build.log; then
+            echo "нет задачи assembleRelease, пробую assembleDebug"
+            ./gradlew assembleDebug --no-daemon -PAPP_ID="$APP_ID" -PAPP_HASH="$APP_HASH" >> build.log 2>&1
+            STATUS=$?
+          fi
+          echo "GRADLE_STATUS=$STATUS" >> "$GITHUB_ENV"
+          exit $STATUS
+
+      - name: ПРИЧИНА ПАДЕНИЯ (читать тут)
+        if: failure()
+        run: |
+          echo "=========================================="
+          echo "          ЧТО СЛОМАЛОСЬ"
+          echo "=========================================="
+          if [ -f build.log ]; then
+            grep -n -A 25 "What went wrong" build.log | head -n 80 || true
+            echo "------------------------------------------"
+            grep -n "Caused by" build.log | head -n 15 || true
+            echo "------------------------------------------"
+            echo "ПОСЛЕДНИЕ 60 СТРОК:"
+            tail -n 60 build.log
+          else
+            echo "build.log не создался, значит упало до gradle"
+          fi
+          {
+            echo "=== ЧТО СЛОМАЛОСЬ ==="
+            grep -A 25 "What went wrong" build.log 2>/dev/null
+            echo
+            echo "=== CAUSED BY ==="
+            grep -A 5 "Caused by" build.log 2>/dev/null | head -n 60
+            echo
+            echo "=== ХВОСТ ЛОГА ==="
+            tail -n 150 build.log 2>/dev/null
+          } > ERROR.txt
+          exit 1
+
+      - name: Забрать ERROR.txt
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Craftgram-APK
+          name: prichina-padeniya
+          path: ERROR.txt
+          if-no-files-found: ignore
+
+      - name: Забрать APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CraftGram-apk
           path: |
-            TMessagesProj_App/build/outputs/apk/**/*.apk
-            **/build/outputs/apk/**/*.apk
-          if-no-files-found: warn
-          
+            **/*.apk
+            **/*.aab
+            
