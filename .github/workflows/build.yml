@@ -1,54 +1,62 @@
-name: Build CraftGram
+name: Build Craftgram
 
 on:
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - '**.md'
   workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'zulu'
           java-version: '17'
 
-
-      - name: Install NDK and CMake
+      - name: Find Android SDK and Install NDK/CMake
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "ndk;21.4.7075529" "cmake;3.22.1" "build-tools;34.0.0" "platforms;android-34"
+          # Try to find sdkmanager in common SDK locations
+          SDK_ROOT="$ANDROID_SDK_ROOT"
+          if [ -z "$SDK_ROOT" ]; then
+              SDK_ROOT="$HOME/Android/Sdk"
+          fi
+          if [ ! -d "$SDK_ROOT" ]; then
+              SDK_ROOT="/usr/local/lib/android/sdk"
+          fi
+          if [ ! -d "$SDK_ROOT" ]; then
+              echo "Error: Android SDK not found in common locations."
+              exit 1
+          fi
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$SDK_ROOT/platform-tools" >> $GITHUB_PATH
+
+          sdkmanager --licenses || true
+          sdkmanager "ndk;25.2.9519653" "cmake;3.22.1" --sdk_root=$SDK_ROOT
 
       - name: Write API keys
         run: |
-          printf 'APP_ID=%s\nAPP_HASH=%s\nTELEGRAM_APP_ID=%s\nTELEGRAM_APP_HASH=%s\n' "${{ secrets.APP_ID }}" "${{ secrets.APP_HASH }}" "${{ secrets.APP_ID }}" "${{ secrets.APP_HASH }}" >> local.properties
-          printf 'APP_ID=%s\nAPP_HASH=%s\nTELEGRAM_APP_ID=%s\nTELEGRAM_APP_HASH=%s\n' "${{ secrets.APP_ID }}" "${{ secrets.APP_HASH }}" "${{ secrets.APP_ID }}" "${{ secrets.APP_HASH }}" >> gradle.properties
+          echo "API_ID = ${{ secrets.APP_ID }}" > ./gradle.properties
+          echo "API_HASH = \"${{ secrets.APP_HASH }}\"" >> ./gradle.properties
 
       - name: Make gradlew executable
-        run: chmod +x gradlew
+        run: chmod +x ./gradlew
 
       - name: Build APK
-        run: |
-          ./gradlew :TMessagesProj_App:assembleAfatRelease --no-daemon --stacktrace || ./gradlew :TMessagesProj_App:assembleRelease --no-daemon --stacktrace || ./gradlew assembleRelease --no-daemon --stacktrace
-        env:
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_HASH: ${{ secrets.APP_HASH }}
-          TELEGRAM_APP_ID: ${{ secrets.APP_ID }}
-          TELEGRAM_APP_HASH: ${{ secrets.APP_HASH }}
+        run: ./gradlew assembleRelease
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: CraftGram-APK
-          path: '**/build/outputs/apk/**/*.apk'
-          if-no-files-found: error
+          name: Craftgram.apk
+          path: app/build/outputs/apk/release/app-release.apk
+
+
