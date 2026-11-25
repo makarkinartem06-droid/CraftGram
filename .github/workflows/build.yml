@@ -1,4 +1,4 @@
-name: Build Craftgram
+name: Build CraftGram
 
 on:
   push:
@@ -20,78 +20,61 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: '17'
 
-      - name: Проверить секреты
+      - name: Проверка секретов
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_HASH: ${{ secrets.APP_HASH }}
         run: |
           if [ -z "$APP_ID" ] || [ -z "$APP_HASH" ]; then
-            echo "СЕКРЕТЫ ПУСТЫЕ! Добавь APP_ID и APP_HASH в Settings - Secrets and variables - Actions"
+            echo "СЕКРЕТЫ APP_ID / APP_HASH ПУСТЫЕ. Добавь их: Settings -> Secrets and variables -> Actions"
             exit 1
           fi
-          echo "секреты на месте, длина APP_ID: ${#APP_ID}, длина APP_HASH: ${#APP_HASH}"
+          echo "Секреты на месте, APP_ID длиной ${#APP_ID} символов, APP_HASH длиной ${#APP_HASH} символов"
 
-      - name: Прописать ключи в gradle и local.properties
+      - name: Ключи в local.properties
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_HASH: ${{ secrets.APP_HASH }}
+          MAPS_V2_API: ${{ secrets.MAPS_V2_API }}
         run: |
-          for f in local.properties gradle.properties; do
-            touch "$f"
-            {
-              echo "TELEGRAM_APP_ID=$APP_ID"
-              echo "TELEGRAM_APP_HASH=$APP_HASH"
-              echo "APP_ID=$APP_ID"
-              echo "APP_HASH=$APP_HASH"
-            } >> "$f"
-          done
-          if [ -d TMessagesProj ]; then
-            touch TMessagesProj/gradle.properties
-            {
-              echo "TELEGRAM_APP_ID=$APP_ID"
-              echo "TELEGRAM_APP_HASH=$APP_HASH"
-              echo "APP_ID=$APP_ID"
-              echo "APP_HASH=$APP_HASH"
-            } >> TMessagesProj/gradle.properties
+          MAPS_KEY="$MAPS_V2_API"
+          if [ -z "$MAPS_KEY" ]; then
+            MAPS_KEY="stub_maps_key_replace_me"
+            echo "MAPS_V2_API не задан, ставлю заглушку (карта в приложении работать не будет, сборке не мешает)"
           fi
-          echo "ключи прописаны"
+          for TARGET in "local.properties" "TMessagesProj/local.properties"; do
+            {
+              echo "sdk.dir=$ANDROID_HOME"
+              echo "APP_ID=$APP_ID"
+              echo "APP_HASH=$APP_HASH"
+              echo "MAPS_V2_API=$MAPS_KEY"
+            } > "$TARGET"
+            echo "Записал $TARGET:"
+            grep -v "APP_HASH\|MAPS_V2_API" "$TARGET"
+          done
 
       - name: Build APK
-        env:
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_HASH: ${{ secrets.APP_HASH }}
-          TELEGRAM_APP_ID: ${{ secrets.APP_ID }}
-          TELEGRAM_APP_HASH: ${{ secrets.APP_HASH }}
         run: |
-          chmod +x gradlew
           set -o pipefail
-          ./gradlew :TMessagesProj_App:assembleAfatDebug --no-daemon --stacktrace \
-            -PTELEGRAM_APP_ID="$APP_ID" -PTELEGRAM_APP_HASH="$APP_HASH" \
-            -PAPP_ID="$APP_ID" -PAPP_HASH="$APP_HASH" \
-            2>&1 | tee gradle.log
+          chmod +x gradlew
+          ./gradlew :TMessagesProj_App:assembleAfatDebug --stacktrace --no-daemon 2>&1 | tee gradle.log
 
       - name: Показать причину падения
         if: failure()
         run: |
           echo "=== ЧТО СЛОМАЛОСЬ ==="
-          if [ -f gradle.log ]; then
-            grep -n -A 6 "What went wrong" gradle.log | head -n 40 || true
-            echo "=== Caused by ==="
-            grep -n -m 3 -A 3 "Caused by" gradle.log | head -n 30 || true
-            echo "=== ПОСЛЕДНИЕ 60 СТРОК ==="
-            tail -n 60 gradle.log
-          else
-            echo "gradle.log нет - сборка не дошла до gradle"
-          fi
+          grep -n -A 4 "What went wrong" gradle.log | head -40 || true
+          echo "=== Caused by ==="
+          grep -n -A 3 "Caused by" gradle.log | head -40 || true
 
-      - name: Собрать apk в одну папку
+      - name: Собрать apk
         run: |
           rm -rf apk
           mkdir -p apk
-          find . -name "*.apk" -path "*build/outputs*" -exec cp {} apk/ \;
-          ls -la apk/
+          find . -name "*.apk" -not -path "./apk/*" -exec cp {} apk/ \;
+          ls -la apk
           if [ -z "$(ls -A apk)" ]; then
             echo "APK НЕ СОБРАЛСЯ"
             exit 1
@@ -103,4 +86,14 @@ jobs:
           name: CraftGram-apk
           path: apk/*.apk
           if-no-files-found: error
+
+      - name: Show log tail
+        if: failure()
+        run: |
+          echo "=== ПОСЛЕДНИЕ 150 СТРОК ЛОГА GRADLE ==="
+          if [ -f gradle.log ]; then
+            tail -n 150 gradle.log
+          else
+            echo "gradle.log не найден"
+          fi
           
