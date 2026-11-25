@@ -1,105 +1,111 @@
-name: Build CraftGram
+name: Build Craftgram
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
-  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
+
     steps:
-      - name: Checkout
+      - name: Checkout с сабмодулями
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 1
 
-      - name: Set up JDK 17
+      - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Кэш gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
 
-      - name: Install SDK packages and accept licenses
+      - name: Android SDK уже есть на раннере - проверяем
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          ls "$ANDROID_HOME" || true
+          echo "--- platforms ---"
+          ls "$ANDROID_HOME/platforms" || true
+          echo "--- build-tools ---"
+          ls "$ANDROID_HOME/build-tools" || true
 
-      - name: Check secrets
-        env:
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_HASH: ${{ secrets.APP_HASH }}
-        run: |
-          if [ -z "$APP_ID" ] || [ -z "$APP_HASH" ]; then
-            echo "::error::Секреты APP_ID / APP_HASH не заданы в Settings -> Secrets and variables -> Actions"
-            exit 1
-          fi
-
-      - name: Write local.properties
-        env:
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_HASH: ${{ secrets.APP_HASH }}
-        run: |
-          printf 'sdk.dir=%s\nAPP_ID=%s\nAPP_HASH=%s\n' "$ANDROID_HOME" "$APP_ID" "$APP_HASH" > local.properties
-          if [ -d TMessagesProj ]; then
-            cp local.properties TMessagesProj/local.properties || true
-          fi
-
-      - name: Build APK
-        env:
-          APP_ID: ${{ secrets.APP_ID }}
-          APP_HASH: ${{ secrets.APP_HASH }}
-          TELEGRAM_APP_ID: ${{ secrets.APP_ID }}
-          TELEGRAM_APP_HASH: ${{ secrets.APP_HASH }}
+      - name: Готовим gradlew и память
         run: |
           chmod +x gradlew
+          echo "org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g" >> gradle.properties
+          echo "org.gradle.parallel=true" >> gradle.properties
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "--- хвост gradle.properties ---"
+          tail -n 8 gradle.properties
+
+      - name: Build APK
+        run: |
           set -o pipefail
-          ./gradlew :TMessagesProj_App:assembleAfatRelease --stacktrace --no-daemon 2>&1 | tee gradle.log
-          STATUS=${PIPESTATUS[0]}
-          echo "=== GRADLE EXIT CODE: $STATUS ==="
-          if [ "$STATUS" != "0" ]; then
-            echo "=== ЕСЛИ ВЫШЕ Task not found, ВОТ СПИСОК РЕАЛЬНЫХ ТАСОК СБОРКИ ==="
-            ./gradlew tasks --all --no-daemon 2>/dev/null | grep -i assemble | head -60 || true
-            exit 1
+          ./gradlew :TMessagesProj_App:assembleAfatDebug --stacktrace --no-daemon 2>&1 | tee gradle.log
+
+      - name: Если таск не нашёлся - показать реальные имена
+        if: failure()
+        run: |
+          if grep -qi "not found in project\|not found in root project\|Task 'assembleAfatDebug' not found" gradle.log 2>/dev/null; then
+            echo "=== ТАКОГО ТАСКА НЕТ, ВОТ РЕАЛЬНЫЙ СПИСОК ==="
+            ./gradlew :TMessagesProj_App:tasks --all --no-daemon 2>&1 | grep -Ei "assemble|bundle" || echo "список пуст"
+            echo "=== И В ГЛАВНОМ ПРОЕКТЕ ==="
+            ./gradlew tasks --all --no-daemon 2>&1 | grep -Ei "assemble|bundle" || true
+          else
+            echo "таск существует, причина падения другая - смотри хвост лога ниже"
           fi
 
-      - name: Show log tail (always)
+      - name: Хвост лога на экран
         if: always()
         run: |
-          echo "=== ПОСЛЕДНИЕ 80 СТРОК ЛОГА GRADLE ==="
-          tail -n 80 gradle.log || echo "gradle.log не найден"
+          echo "=== ПОСЛЕДНИЕ 150 СТРОК ЛОГА GRADLE ==="
+          tail -n 150 gradle.log 2>/dev/null || echo "gradle.log не найден"
+          echo
           echo "=== ЧТО НАШЛОСЬ ИЗ APK ==="
-          find . -name "*.apk" -not -path "*/\.*" || true
+          find . -path "*/outputs/apk/*" -name "*.apk" 2>/dev/null || echo "apk нет"
+
+      - name: Собрать apk в одну папку
+        if: always()
+        run: |
+          rm -rf apk
+          mkdir -p apk
+          find . -path "*/outputs/apk/*" -name "*.apk" -exec cp -v {} apk/ \; 2>/dev/null || true
+          ls -la apk
+          if [ -z "$(ls -A apk 2>/dev/null)" ]; then
+            echo "APK НЕ СОБРАЛСЯ"
+            exit 1
+          fi
+          echo "APK ЕСТЬ, ВСЁ ХОРОШО"
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: CraftGram-apk
-          path: '**/build/outputs/apk/**/*.apk'
+          path: apk/*.apk
           if-no-files-found: error
+          retention-days: 30
 
-      - name: Save failure reason
-        if: failure()
-        run: |
-          {
-            echo "=== ЧТО СЛОМАЛОСЬ ==="
-            grep -A 15 "What went wrong" gradle.log || true
-            echo ""
-            echo "=== CAUSED BY ==="
-            grep -B 2 -A 8 "Caused by" gradle.log | head -80 || true
-            echo ""
-            echo "=== ХВОСТ ЛОГА ==="
-            tail -n 60 gradle.log || true
-          } > prichina-padeniya.txt
-
-      - name: Upload failure reason
-        if: failure()
+      - name: Лог gradle артефактом
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: prichina-padeniya
-          path: prichina-padeniya.txt
+          name: gradle-log
+          path: gradle.log
+          if-no-files-found: warn
+          retention-days: 14
           
